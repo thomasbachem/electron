@@ -732,15 +732,11 @@ void InspectableWebContents::LoadNetworkResource(DispatchCallback callback,
     url_loader_factory = network::SharedURLLoaderFactory::Create(
         std::make_unique<network::WrapperPendingSharedURLLoaderFactory>(
             std::move(pending_remote)));
-  } else if (const auto* const protocol_handler =
-                 protocol_registry->FindRegistered(gurl.scheme())) {
-    auto* browser_context = static_cast<ElectronBrowserContext*>(
-        GetDevToolsWebContents()->GetBrowserContext());
+  } else if (auto factory =
+                 protocol_registry->CreateRegisteredFactory(gurl.scheme())) {
     url_loader_factory = network::SharedURLLoaderFactory::Create(
         std::make_unique<network::WrapperPendingSharedURLLoaderFactory>(
-            ElectronURLLoaderFactory::Create(protocol_handler->first,
-                                             protocol_handler->second,
-                                             browser_context->GetWeakPtr())));
+            std::move(factory)));
   } else {
     auto* partition = GetDevToolsWebContents()
                           ->GetBrowserContext()

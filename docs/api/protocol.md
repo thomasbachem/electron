@@ -56,6 +56,68 @@ app.whenReady().then(() => {
 })
 ```
 
+## Handling a protocol in a worker thread
+
+A handler registered on the main thread shares it with everything else the main
+process does: while the app is busy there, requests to the scheme wait. For
+schemes that serve an app's own pages and assets, the handler can instead run
+in a Node.js [worker thread](https://nodejs.org/api/worker_threads.html) created
+by the main process, where `require('electron').protocol` provides `handle`,
+`unhandle` and `isProtocolHandled` for the default session. Requests for such a
+scheme go from the renderer to the worker and back without passing through the
+main thread.
+
+```js
+// main.js
+const { app, protocol, BrowserWindow } = require('electron')
+const { Worker } = require('node:worker_threads')
+const path = require('node:path')
+
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'app', privileges: { standard: true, secure: true, supportFetchAPI: true } }
+])
+
+app.whenReady().then(() => {
+  const worker = new Worker(path.join(__dirname, 'protocol-worker.js'))
+  worker.once('message', () => {
+    new BrowserWindow().loadURL('app://bundle/index.html')
+  })
+})
+```
+
+```js
+// protocol-worker.js
+const { protocol } = require('electron')
+const { parentPort } = require('node:worker_threads')
+const fs = require('node:fs/promises')
+const path = require('node:path')
+
+async function main () {
+  await protocol.handle('app', async (request) => {
+    const { pathname } = new URL(request.url)
+    const file = path.join(__dirname, 'bundle', path.normalize(pathname))
+    return new Response(await fs.readFile(file), {
+      headers: { 'content-type': pathname.endsWith('.js') ? 'text/javascript' : 'text/html' }
+    })
+  })
+  parentPort.postMessage('ready')
+}
+
+main()
+```
+
+In a worker thread `protocol.handle()` returns a `Promise` that resolves once
+the scheme is registered, and rejects if the main thread or another worker
+already handles it. A worker that handles a scheme stays alive until it calls
+`protocol.unhandle()` or is terminated, at which point the scheme is released.
+The scheme must still be registered with `protocol.registerSchemesAsPrivileged`
+in the main process before the `ready` event, `webRequest` listeners in the
+main process apply to these requests as to any other, and `net.fetch` is not
+available inside the worker, so a handler answers from its own resources
+(files, memory, its own network client) rather than by forwarding the request.
+Intercepting a built-in scheme such as `https` or `file` from a worker is not
+supported.
+
 ## Protocol names
 
 [RFC 3986](https://www.rfc-editor.org/rfc/rfc3986#section-3.1) defines what a valid

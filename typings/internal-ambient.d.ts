@@ -289,6 +289,18 @@ declare namespace NodeJS {
     _linkedBinding(name: 'electron_common_asar'): AsarBinding;
     _linkedBinding(name: 'electron_common_command_line'): Electron.CommandLine;
     _linkedBinding(name: 'electron_common_environment'): EnvironmentBinding;
+    _linkedBinding(name: 'electron_worker_protocol'): {
+      setCallbacks(
+        onRequest: (id: number, request: any) => void,
+        onCancel: (id: number) => void,
+        onWritten: (id: number, bytesWritten: number) => void
+      ): void;
+      handle(partition: string, scheme: string): Promise<boolean>;
+      unhandle(scheme: string): void;
+      respond(id: number, status: number, statusText: string, headers: [string, string][], hasBody: boolean): void;
+      write(id: number, chunk: Uint8Array): void;
+      finish(id: number, netError: number): void;
+    };
     _linkedBinding(name: 'electron_common_features'): FeaturesBinding;
     _linkedBinding(name: 'electron_common_native_image'): { nativeImage: typeof Electron.NativeImage };
     _linkedBinding(name: 'electron_common_shared_texture'): Electron.SharedTextureSubtle;

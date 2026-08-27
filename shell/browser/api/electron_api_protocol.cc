@@ -243,7 +243,7 @@ bool Protocol::UnregisterProtocol(const std::string& scheme,
 }
 
 bool Protocol::IsProtocolRegistered(const std::string& scheme) {
-  return protocol_registry_->FindRegistered(scheme) != nullptr;
+  return protocol_registry_->IsRegistered(scheme);
 }
 
 Protocol::Error Protocol::InterceptProtocol(ProtocolType type,

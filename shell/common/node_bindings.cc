@@ -98,6 +98,7 @@
   V(electron_browser_web_frame_main)      \
   V(electron_browser_web_view_manager)    \
   V(electron_browser_window)              \
+  V(electron_worker_protocol)             \
   V(electron_common_net)
 
 #define ELECTRON_COMMON_BINDINGS(V)   \

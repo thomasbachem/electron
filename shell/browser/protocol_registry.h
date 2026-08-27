@@ -5,10 +5,13 @@
 #ifndef ELECTRON_SHELL_BROWSER_PROTOCOL_REGISTRY_H_
 #define ELECTRON_SHELL_BROWSER_PROTOCOL_REGISTRY_H_
 
+#include <functional>
+#include <map>
 #include <string>
 #include <string_view>
 
 #include "base/memory/raw_ptr.h"
+#include "base/memory/scoped_refptr.h"
 #include "content/public/browser/content_browser_client.h"
 #include "shell/browser/net/electron_url_loader_factory.h"
 
@@ -19,6 +22,7 @@ class BrowserContext;
 namespace electron {
 
 class ElectronBrowserContext;
+class WorkerProtocolEndpoint;
 
 class ProtocolRegistry {
  public:
@@ -54,6 +58,19 @@ class ProtocolRegistry {
   [[nodiscard]] const HandlersMap::mapped_type* FindIntercepted(
       std::string_view scheme) const;
 
+  // Schemes served by a handler running in a Node.js worker thread; see
+  // shell/browser/net/worker_protocol.h. A scheme has at most one handler of
+  // either kind.
+  bool RegisterWorkerProtocol(const std::string& scheme,
+                              scoped_refptr<WorkerProtocolEndpoint> endpoint);
+  bool UnregisterWorkerProtocol(const std::string& scheme,
+                                WorkerProtocolEndpoint* endpoint);
+  bool IsRegistered(std::string_view scheme) const;
+  // A factory serving `scheme` if a handler of either kind is registered for
+  // it (not intercepted schemes), else an invalid remote.
+  mojo::PendingRemote<network::mojom::URLLoaderFactory> CreateRegisteredFactory(
+      std::string_view scheme) const;
+
  private:
   friend class ElectronBrowserContext;
 
@@ -63,6 +80,8 @@ class ProtocolRegistry {
 
   HandlersMap handlers_;
   HandlersMap intercept_handlers_;
+  std::map<std::string, scoped_refptr<WorkerProtocolEndpoint>, std::less<>>
+      worker_handlers_;
 };
 
 }  // namespace electron

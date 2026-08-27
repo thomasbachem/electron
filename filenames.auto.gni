@@ -789,8 +789,10 @@ auto_filenames = {
   worker_thread_bundle_deps = [
     "lib/common/define-properties.ts",
     "lib/common/electron-module.ts",
+    "lib/common/webpack-globals-provider.ts",
     "lib/worker_thread/api/exports/electron.ts",
     "lib/worker_thread/api/module-list.ts",
+    "lib/worker_thread/api/protocol.ts",
     "lib/worker_thread/init.ts",
     "package.json",
     "tsconfig.electron.json",
