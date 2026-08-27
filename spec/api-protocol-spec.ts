@@ -919,6 +919,178 @@ describe('protocol module', () => {
     });
   });
 
+  describe('protocol.handle in a worker thread', () => {
+    // Uses the 'http-like' scheme registered as standard in spec/index.js.
+    const { Worker } = require('node:worker_threads') as typeof import('node:worker_threads');
+    let worker: import('node:worker_threads').Worker;
+    const startWorker = async (source: string) => {
+      worker = new Worker(
+        `
+        const { parentPort } = require('node:worker_threads');
+        const { protocol } = require('electron');
+        (async () => { ${source} })().then((v) => parentPort.postMessage({ ready: v }), (e) => parentPort.postMessage({ error: String(e) }));
+        parentPort.on('message', (m) => { if (m === 'stop') { protocol.unhandle('http-like'); parentPort.postMessage('stopped'); } });
+      `,
+        { eval: true }
+      );
+      const [message] = await once(worker, 'message');
+      if (message.error) throw new Error(message.error);
+      return message.ready;
+    };
+    afterEach(async () => {
+      if (worker) {
+        await worker.terminate();
+        worker = null as any;
+      }
+      await closeAllWindows();
+    });
+
+    it('serves requests from the worker', async () => {
+      await startWorker(
+        "await protocol.handle('http-like', (req) => new Response('hello ' + new URL(req.url).pathname, { headers: { 'content-type': 'text/plain', 'x-from': 'worker' } }));"
+      );
+      const response = await net.fetch('http-like://host/path');
+      expect(response.status).to.equal(200);
+      expect(response.headers.get('x-from')).to.equal('worker');
+      expect(await response.text()).to.equal('hello /path');
+    });
+
+    it('serves a page, and its fetches while the main process is busy', async () => {
+      await startWorker(`
+        await protocol.handle('http-like', (req) => {
+          const { pathname } = new URL(req.url);
+          if (pathname === '/data') return new Response('data');
+          return new Response('<!doctype html><body>page</body>', { headers: { 'content-type': 'text/html' } });
+        });
+      `);
+      const w = new BrowserWindow({ show: false, webPreferences: { sandbox: true } });
+      await w.loadURL('http-like://host/');
+      await w.webContents.executeJavaScript(
+        "window.timing = new Promise(r => setTimeout(() => { const s = performance.now(); fetch('/data').then(x => x.text()).then(t => r([t, performance.now() - s])); }, 50)); true"
+      );
+      const end = Date.now() + 600;
+      while (Date.now() < end) {
+        /* main process busy */
+      }
+      const [text, elapsed] = await w.webContents.executeJavaScript('window.timing');
+      expect(text).to.equal('data');
+      expect(elapsed).to.be.lessThan(300);
+    });
+
+    it('streams a body and passes request method, headers and body to the handler', async () => {
+      await startWorker(`
+        await protocol.handle('http-like', async (req) => {
+          const echo = { method: req.method, header: req.headers.get('x-test'), body: await req.text() };
+          const encoder = new TextEncoder();
+          const stream = new ReadableStream({
+            async start (controller) {
+              for (const part of [JSON.stringify(echo), '|', 'x'.repeat(1024 * 1024)]) { controller.enqueue(encoder.encode(part)); await new Promise((r) => setTimeout(r, 5)); }
+              controller.close();
+            }
+          });
+          return new Response(stream);
+        });
+      `);
+      const response = await net.fetch('http-like://host/echo', {
+        method: 'POST',
+        headers: { 'x-test': 'yes' },
+        body: 'payload'
+      });
+      const text = await response.text();
+      const [json, filler] = text.split('|');
+      expect(JSON.parse(json)).to.deep.equal({ method: 'POST', header: 'yes', body: 'payload' });
+      expect(filler).to.have.lengthOf(1024 * 1024);
+    });
+
+    it('streams a large body in many chunks', async () => {
+      await startWorker(`
+        await protocol.handle('http-like', () => {
+          const chunk = new Uint8Array(16 * 1024).fill(120);
+          let left = 256;
+          return new Response(new ReadableStream({ pull (controller) { if (left-- > 0) controller.enqueue(chunk); else controller.close(); } }));
+        });
+      `);
+      const response = await net.fetch('http-like://host/big');
+      expect((await response.arrayBuffer()).byteLength).to.equal(256 * 16 * 1024);
+    });
+
+    it('fails the request when the handler throws or returns a network error', async () => {
+      await startWorker(
+        "await protocol.handle('http-like', (req) => new URL(req.url).pathname === '/throw' ? Promise.reject(new Error('boom')) : Response.error());"
+      );
+      await expect(net.fetch('http-like://host/throw')).to.eventually.be.rejectedWith(/ERR_FAILED/);
+      await expect(net.fetch('http-like://host/error')).to.eventually.be.rejectedWith(/ERR_FAILED/);
+    });
+
+    it('fails requests in flight when the worker exits', async () => {
+      await startWorker(`
+        await protocol.handle('http-like', () => new Response(new ReadableStream({
+          start (controller) { controller.enqueue(new TextEncoder().encode('partial')); setTimeout(() => process.exit(0), 50); }
+        })));
+      `);
+      const response = await net.fetch('http-like://host/exit');
+      await expect(response.text()).to.eventually.be.rejected();
+      worker = null as any;
+    });
+
+    it('follows redirects returned by the handler', async () => {
+      await startWorker(
+        "await protocol.handle('http-like', (req) => new URL(req.url).pathname === '/from' ? Response.redirect('http-like://host/to', 302) : new Response('arrived at ' + new URL(req.url).pathname, { headers: { 'content-type': 'text/html' } }));"
+      );
+      const response = await net.fetch('http-like://host/from');
+      expect(await response.text()).to.equal('arrived at /to');
+      const w = new BrowserWindow({ show: false, webPreferences: { sandbox: true } });
+      await w.loadURL('http-like://host/page');
+      expect(await w.webContents.executeJavaScript("fetch('/from').then(r => r.text())")).to.equal('arrived at /to');
+    });
+
+    it('aborts the handler when the request is cancelled', async () => {
+      await startWorker(`
+        globalThis.aborted = new Promise((resolve) => {
+          protocol.handle('http-like', (req) => { req.signal.addEventListener('abort', () => resolve(true)); return new Promise(() => {}); });
+        });
+        parentPort.on('message', async (m) => { if (m === 'aborted?') parentPort.postMessage(await Promise.race([globalThis.aborted, new Promise((r) => setTimeout(() => r(false), 2000))])); });
+      `);
+      const controller = new AbortController();
+      const pending = net.fetch('http-like://host/hang', { signal: controller.signal }).catch((e) => e);
+      await setTimeout(100);
+      controller.abort();
+      await pending;
+      worker.postMessage('aborted?');
+      const [aborted] = await once(worker, 'message');
+      expect(aborted).to.equal(true);
+    });
+
+    it('refuses a scheme the main thread already handles and releases it on unhandle or exit', async () => {
+      protocol.handle('http-like', () => new Response('main'));
+      try {
+        await expect(
+          startWorker("await protocol.handle('http-like', () => new Response('worker'));")
+        ).to.eventually.be.rejectedWith(/already handled/);
+      } finally {
+        protocol.unhandle('http-like');
+      }
+      await worker.terminate();
+      await startWorker("await protocol.handle('http-like', () => new Response('worker'));");
+      expect(protocol.isProtocolHandled('http-like')).to.equal(true);
+      expect(() => protocol.handle('http-like', () => new Response('main'))).to.throw();
+      worker.postMessage('stop');
+      await once(worker, 'message');
+      await setTimeout(50);
+      expect(protocol.isProtocolHandled('http-like')).to.equal(false);
+      await startWorker("await protocol.handle('http-like', () => new Response('again'));");
+      await worker.terminate();
+      worker = null as any;
+      await setTimeout(50);
+      expect(protocol.isProtocolHandled('http-like')).to.equal(false);
+      await startWorker(
+        "const pending = protocol.handle('http-like', () => new Response('never')); protocol.unhandle('http-like'); await pending.catch(() => {});"
+      );
+      await setTimeout(50);
+      expect(protocol.isProtocolHandled('http-like')).to.equal(false);
+    });
+  });
+
   describe('protocol.registerSchemesAsPrivileged allowServiceWorkers', () => {
     protocol.registerStringProtocol(serviceWorkerScheme, (request, cb) => {
       if (request.url.endsWith('.js')) {
